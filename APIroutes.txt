@@ -1,0 +1,165 @@
+
+		// Public user endpoints for registration, login and account management
+		v1.POST("/users", middleware.RateLimiter(), userHandler.CreateUser)
+		v1.POST("/users/login", middleware.LoginRateLimiter(), userHandler.LoginUser)
+		v1.GET("/users/verify-email/:token", userHandler.VerifyEmail)
+		v1.POST("/users/forgot-password", userHandler.ForgotPassword)
+		v1.POST("/users/reset-password", userHandler.ResetPassword)
+		v1.GET("/users/:id", userHandler.GetUser)
+
+		// Group for endpoints that require authentication.
+		secured := v1.Group("")
+		secured.Use(middleware.AuthMiddleware())
+		{
+			// User endpoints
+			secured.GET("/users/me", userHandler.GetCurrentUser)
+			secured.PUT("/users/me", userHandler.UpdateCurrentUser)
+			secured.PATCH("/users/me", userHandler.PatchCurrentUser)
+			secured.DELETE("/users/me", userHandler.DeleteCurrentUser)
+			secured.GET("/admin/users", userHandler.GetAllUsers)
+
+			// Recipe endpoints
+			secured.POST("/recipes", recipeHandler.GenerateRecipe)
+			secured.POST("/recipes/:id/approve", recipeHandler.ApproveRecipe)
+			secured.POST("/recipes/:id/modify", recipeHandler.StartRecipeModification)
+			secured.POST("/recipes/:id/modify-with-ai", recipeHandler.ModifyRecipeWithAI)
+			secured.POST("/recipes/search", recipeHandler.SearchRecipes)
+			secured.PUT("/recipes/:id", recipeHandler.ModifyRecipe)
+			secured.GET("/recipes/:id", recipeHandler.GetRecipe)
+			secured.GET("/recipes", recipeHandler.ListRecipes)
+		}
+	}
+
+	logger.Info("Router setup complete")
+	return router
+}
+
+
+this is the modifywithAI function:
+
+
+// ModifyRecipeWithAI handles the request to modify a recipe using AI
+func (h *RecipeHandler) ModifyRecipeWithAI(c *gin.Context) {
+	recipeID := c.Param("id")
+	if recipeID == "" {
+		c.JSON(http.StatusBadRequest, dtos.ErrorResponse{
+			Code:    "BAD_REQUEST",
+			Message: "Recipe ID is required",
+		})
+		return
+	}
+
+	var req struct {
+		ModificationType string `json:"modification_type" binding:"required"`
+		AdditionalNotes  string `json:"additional_notes"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dtos.ErrorResponse{
+			Code:    "BAD_REQUEST",
+			Message: "Invalid request body",
+		})
+		return
+	}
+
+	var recipe repositories.Recipe
+
+	// First try to get from Redis
+	cachedRecipe, err := h.recipeCache.GetRecipe(c.Request.Context(), recipeID)
+	if err == nil {
+		// Use the current version from the cache
+		recipe = cachedRecipe.Current
+	} else {
+		// If not in Redis, get from database
+		var dbRecipe models.Recipe
+		if err := h.db.First(&dbRecipe, recipeID).Error; err != nil {
+			c.JSON(http.StatusNotFound, dtos.ErrorResponse{
+				Code:    "NOT_FOUND",
+				Message: "Recipe not found",
+			})
+			return
+		}
+
+		// Convert to repository type
+		recipe = repositories.Recipe{
+			Title:            dbRecipe.Title,
+			Description:      dbRecipe.Description,
+			Servings:         dbRecipe.Servings,
+			PrepTimeMinutes:  dbRecipe.PrepTimeMinutes,
+			CookTimeMinutes:  dbRecipe.CookTimeMinutes,
+			TotalTimeMinutes: dbRecipe.TotalTimeMinutes,
+			Ingredients:      convertToRepoIngredients(dbRecipe.Ingredients),
+			Instructions:     convertToRepoInstructions(dbRecipe.Instructions),
+			Nutrition:        convertToRepoNutrition(dbRecipe.Nutrition),
+			Tags:             dbRecipe.Tags,
+			Difficulty:       dbRecipe.Difficulty,
+		}
+	}
+
+	// Prepare the prompt for DeepSeek
+	prompt := fmt.Sprintf(`Modify the following recipe according to these requirements:
+Modification Type: %s
+Additional Notes: %s
+
+Original Recipe:
+Title: %s
+Description: %s
+Servings: %d
+Prep Time: %d minutes
+Cook Time: %d minutes
+Total Time: %d minutes
+Difficulty: %s
+
+Ingredients:
+%s
+
+Instructions:
+%s
+
+Nutrition:
+%s
+
+Tags: %s
+
+Please provide the modified recipe in the same format, maintaining the structure but updating the content according to the modification requirements.`,
+		req.ModificationType,
+		req.AdditionalNotes,
+		recipe.Title,
+		recipe.Description,
+		recipe.Servings,
+		recipe.PrepTimeMinutes,
+		recipe.CookTimeMinutes,
+		recipe.TotalTimeMinutes,
+		recipe.Difficulty,
+		formatIngredients(recipe.Ingredients),
+		formatInstructions(recipe.Instructions),
+		formatNutrition(recipe.Nutrition),
+		strings.Join(recipe.Tags, ", "))
+
+	// Call DeepSeek to modify the recipe
+	modifiedRecipePtr, err := h.deepseekClient.ModifyRecipe(c.Request.Context(), prompt)
+	if err != nil {
+		log.Printf("Failed to modify recipe with AI: %v", err)
+		c.JSON(http.StatusInternalServerError, dtos.ErrorResponse{
+			Code:    "AI_ERROR",
+			Message: "Failed to modify recipe with AI",
+		})
+		return
+	}
+
+	// Cache the modified recipe in Redis with modification count 0
+	tempID, err := h.recipeCache.CacheRecipe(c.Request.Context(), *modifiedRecipePtr)
+	if err != nil {
+		log.Printf("Failed to cache modified recipe in Redis: %v", err)
+		c.JSON(http.StatusInternalServerError, dtos.ErrorResponse{
+			Code:    "INTERNAL_ERROR",
+			Message: "Failed to cache modified recipe",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"recipe_id": tempID,
+		"recipe":    *modifiedRecipePtr,
+	})
+}
