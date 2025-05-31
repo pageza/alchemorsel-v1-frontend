@@ -1,4 +1,4 @@
-import axios from 'axios';
+import axios, { type InternalAxiosRequestConfig, type AxiosResponse, type AxiosError } from 'axios';
 
 const BACKEND_URL = 'http://localhost:8080';
 
@@ -11,9 +11,10 @@ const api = axios.create({
 });
 
 // Add request interceptor to include auth token
-api.interceptors.request.use((config) => {
+api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   const token = localStorage.getItem('auth_token');
   if (token) {
+    config.headers = config.headers || {};
     config.headers.Authorization = `Bearer ${token}`;
   }
   return config;
@@ -21,31 +22,18 @@ api.interceptors.request.use((config) => {
 
 // Add response interceptor to handle errors
 api.interceptors.response.use(
-  (response) => {
-    console.log('Received response:', response.status, response.config.url);
-    console.log('Response headers:', response.headers);
-    console.log('Response data:', response.data);
+  (response: AxiosResponse) => {
     return response;
   },
-  (error) => {
-    console.error('Request failed:', {
-      url: error.config?.url,
-      method: error.config?.method,
-      status: error.response?.status,
-      statusText: error.response?.statusText,
-      data: error.response?.data,
-      headers: error.response?.headers,
-      message: error.message
-    });
-    
+  (error: AxiosError) => {
     if (error.code === 'ERR_NETWORK') {
       throw new Error('Unable to connect to the server. Please check if the backend server is running.');
     }
     if (error.response?.status === 0) {
       throw new Error('CORS error: Unable to access the server. Please check if CORS is enabled on the backend.');
     }
-    if (error.response?.data?.message) {
-      throw new Error(error.response.data.message);
+    if (error.response?.data && typeof error.response.data === 'object' && 'message' in error.response.data) {
+      throw new Error((error.response.data as any).message);
     }
     throw error;
   }
@@ -151,9 +139,7 @@ export interface GenerateRecipeResponse {
 
 export const recipeService = {
   async listRecipes(): Promise<RecipeListResponse> {
-    console.log('Making request to:', `${BACKEND_URL}/v1/recipes`);
     const response = await api.get(`${BACKEND_URL}/v1/recipes`);
-    console.log('Actual request URL:', response.config.url);
     return response.data;
   },
 
@@ -171,19 +157,11 @@ export const recipeService = {
 
   async searchRecipes(query: string): Promise<SearchResponse> {
     try {
-      console.log('Searching recipes with query:', query);
       const response = await api.post<SearchResponse>('/recipes/search', { 
         query: query.trim() 
       });
-      console.log('Search response:', response);
       return response.data;
     } catch (error: any) {
-      console.error('Error in searchRecipes:', {
-        error,
-        response: error.response?.data,
-        status: error.response?.status
-      });
-      
       if (error.response?.data?.message) {
         throw new Error(error.response.data.message);
       }
@@ -193,21 +171,9 @@ export const recipeService = {
 
   async generateRecipe(request: GenerateRecipeRequest): Promise<GenerateRecipeResponse> {
     try {
-      console.log('Generating recipe with request:', request);
-      console.log('Full request URL:', `${api.defaults.baseURL}/recipes`);
-      console.log('Request headers:', api.defaults.headers);
       const response = await api.post<GenerateRecipeResponse>("/recipes", request);
-      console.log('Recipe generation response:', response);
-      console.log('Generated recipe:', response.data);
       return response.data;
     } catch (error: any) {
-      console.error('Error in generateRecipe:', {
-        error,
-        response: error.response?.data,
-        status: error.response?.status,
-        headers: error.response?.headers,
-        config: error.config
-      });
       if (error.response?.data?.message) {
         throw new Error(error.response.data.message);
       }
@@ -227,19 +193,9 @@ export const recipeService = {
 
   async approveRecipe(id: string): Promise<GenerateRecipeResponse> {
     try {
-      console.log('Approving recipe with ID:', id);
-      console.log('Making request to:', `/recipes/${id}/approve`);
       const response = await api.post<GenerateRecipeResponse>(`/recipes/${id}/approve`);
-      console.log('Approve response:', response.data);
       return response.data;
     } catch (error: any) {
-      console.error('Error in approveRecipe:', {
-        error,
-        response: error.response?.data,
-        status: error.response?.status,
-        headers: error.response?.headers,
-        config: error.config
-      });
       if (error.response?.data?.message) {
         throw new Error(error.response.data.message);
       }
@@ -257,4 +213,4 @@ export const recipeService = {
   }
 };
 
-export default api; 
+export default api;      
